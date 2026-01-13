@@ -12,6 +12,8 @@ import {
 // Local storage removed per request; keep everything in memory
 import { generateSalesTasks } from '@/utils/seed';
 
+// Central hook to manage tasks, fixes bugs related to duplicates, undo, sorting and ROI
+
 interface UseTasksState {
   tasks: Task[];
   loading: boolean;
@@ -23,6 +25,7 @@ interface UseTasksState {
   updateTask: (id: string, patch: Partial<Task>) => void;
   deleteTask: (id: string) => void;
   undoDelete: () => void;
+  clearLastDeleted: () => void;
 }
 
 const INITIAL_METRICS: Metrics = {
@@ -41,18 +44,28 @@ export function useTasks(): UseTasksState {
   const [lastDeleted, setLastDeleted] = useState<Task | null>(null);
   const fetchedRef = useRef(false);
 
+  // Normalize incoming tasks and ensure unique IDs
   function normalizeTasks(input: any[]): Task[] {
     const now = Date.now();
+    const seenIds = new Set<string>();
     return (Array.isArray(input) ? input : []).map((t, idx) => {
+      let id = t.id;
+
+      // Generate new ID if missing or duplicate
+      if (!id || seenIds.has(id)){
+        id=crypto.randomUUID();
+      }
+      seenIds.add(id);
+
       const created = t.createdAt ? new Date(t.createdAt) : new Date(now - (idx + 1) * 24 * 3600 * 1000);
       const completed = t.completedAt || (t.status === 'Done' ? new Date(created.getTime() + 24 * 3600 * 1000).toISOString() : undefined);
       return {
-        id: t.id,
-        title: t.title,
-        revenue: Number(t.revenue) ?? 0,
+        id,
+        title: t.title || 'Untitled Task',
+        revenue: Number(t.revenue) || 0,
         timeTaken: Number(t.timeTaken) > 0 ? Number(t.timeTaken) : 1,
-        priority: t.priority,
-        status: t.status,
+        priority: t.priority || 'Low',
+        status: t.status || 'Todo',
         notes: t.notes,
         createdAt: created.toISOString(),
         completedAt: completed,
@@ -60,7 +73,7 @@ export function useTasks(): UseTasksState {
     });
   }
 
-  // Initial load: public JSON -> fallback generated dummy
+  // Load tasks once when app starts
   useEffect(() => {
     let isMounted = true;
     async function load() {
@@ -70,14 +83,6 @@ export function useTasks(): UseTasksState {
         const data = (await res.json()) as any[];
         const normalized: Task[] = normalizeTasks(data);
         let finalData = normalized.length > 0 ? normalized : generateSalesTasks(50);
-        // Injected bug: append a few malformed rows without validation
-        if (Math.random() < 0.5) {
-          finalData = [
-            ...finalData,
-            { id: undefined, title: '', revenue: NaN, timeTaken: 0, priority: 'High', status: 'Todo' } as any,
-            { id: finalData[0]?.id ?? 'dup-1', title: 'Duplicate ID', revenue: 9999999999, timeTaken: -5, priority: 'Low', status: 'Done' } as any,
-          ];
-        }
         if (isMounted) setTasks(finalData);
       } catch (e: any) {
         if (isMounted) setError(e?.message ?? 'Failed to load tasks');
@@ -94,30 +99,13 @@ export function useTasks(): UseTasksState {
     };
   }, []);
 
-  // Injected bug: opportunistic second fetch that can duplicate tasks on fast remounts
-  useEffect(() => {
-    // Delay to race with the primary loader and append duplicate tasks unpredictably
-    const timer = setTimeout(() => {
-      (async () => {
-        try {
-          const res = await fetch('/tasks.json');
-          if (!res.ok) return;
-          const data = (await res.json()) as any[];
-          const normalized = normalizeTasks(data);
-          setTasks(prev => [...prev, ...normalized]);
-        } catch {
-          // ignore
-        }
-      })();
-    }, 0);
-    return () => clearTimeout(timer);
-  }, []);
-
+  // Compute derived values and apply stable sorting
   const derivedSorted = useMemo<DerivedTask[]>(() => {
     const withRoi = tasks.map(withDerived);
     return sortDerived(withRoi);
   }, [tasks]);
 
+  // Calculate dashboard metrics safely
   const metrics = useMemo<Metrics>(() => {
     if (tasks.length === 0) return INITIAL_METRICS;
     const totalRevenue = computeTotalRevenue(tasks);
@@ -129,6 +117,7 @@ export function useTasks(): UseTasksState {
     return { totalRevenue, totalTimeTaken, timeEfficiencyPct, revenuePerHour, averageROI, performanceGrade };
   }, [tasks]);
 
+  // Add new task with safe defaults
   const addTask = useCallback((task: Omit<Task, 'id'> & { id?: string }) => {
     setTasks(prev => {
       const id = task.id ?? crypto.randomUUID();
@@ -140,6 +129,7 @@ export function useTasks(): UseTasksState {
     });
   }, []);
 
+  // Update task and auto-handle completion time
   const updateTask = useCallback((id: string, patch: Partial<Task>) => {
     setTasks(prev => {
       const next = prev.map(t => {
@@ -155,6 +145,7 @@ export function useTasks(): UseTasksState {
     });
   }, []);
 
+  // Delete task and store it for undo
   const deleteTask = useCallback((id: string) => {
     setTasks(prev => {
       const target = prev.find(t => t.id === id) || null;
@@ -163,13 +154,19 @@ export function useTasks(): UseTasksState {
     });
   }, []);
 
+  // Restore last deleted task
   const undoDelete = useCallback(() => {
     if (!lastDeleted) return;
     setTasks(prev => [...prev, lastDeleted]);
     setLastDeleted(null);
   }, [lastDeleted]);
 
-  return { tasks, loading, error, derivedSorted, metrics, lastDeleted, addTask, updateTask, deleteTask, undoDelete };
+  // Clear undo state when snackbar closes
+  const clearLastDeleted = () =>{
+    setLastDeleted(null)
+  } 
+
+  return { tasks, loading, error, derivedSorted, metrics, lastDeleted, addTask, updateTask, deleteTask, undoDelete, clearLastDeleted };
 }
 
 

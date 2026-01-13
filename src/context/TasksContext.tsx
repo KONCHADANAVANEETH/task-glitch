@@ -4,7 +4,7 @@ import { DerivedTask, Metrics, Task } from '@/types';
 
 interface TasksContextValue {
   tasks: Task[];
-  loading: boolean;
+  loading: boolean; 
   error: string | null;
   derivedSorted: DerivedTask[];
   metrics: Metrics;
@@ -13,6 +13,7 @@ interface TasksContextValue {
   updateTask: (id: string, patch: Partial<Task>) => void;
   deleteTask: (id: string) => void;
   undoDelete: () => void;
+  clearLastDeleted: () => void;
 }
 
 const TasksContext = createContext<TasksContextValue | undefined>(undefined);
